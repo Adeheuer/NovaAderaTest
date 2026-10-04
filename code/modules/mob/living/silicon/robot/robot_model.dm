@@ -105,6 +105,7 @@
 		var/obj/item/stack/sheet_module = added_module
 		if(ispath(sheet_module.source, /datum/robot_energy_storage))
 			sheet_module.source = get_or_create_estorage(sheet_module.source)
+			LAZYADD(sheet_module.source.linked_modules, sheet_module)
 
 		if(istype(sheet_module.source))
 			sheet_module.cost = max(sheet_module.cost, 1) // Must not cost 0 to prevent div/0 errors.
@@ -252,7 +253,7 @@
 	cyborg.model = new_model
 	cyborg.update_module_innate()
 	new_model.rebuild_modules()
-	cyborg.radio.recalculateChannels()
+	cyborg.radio?.recalculateChannels() // NOVA EDIT CHANGE - ORIGINAL: cyborg.radio.recalculateChannels()
 	cyborg.set_modularInterface_theme()
 	cyborg.diag_hud_set_health()
 	cyborg.diag_hud_set_status()
@@ -448,7 +449,8 @@
 	model_select_icon = "engineer"
 	model_traits = list(TRAIT_NEGATES_GRAVITY)
 	hat_offset = list("north" = list(0, -4), "south" = list(0, -4), "east" = list(4, -4), "west" = list(-4, -4))
-	var/datum/weakref/night_vision_ref
+	///Weakref to the meson vision action
+	var/datum/weakref/meson_vision_ref
 
 /datum/action/cooldown/borg_meson
 	name = "Toggle Meson Vision"
@@ -456,29 +458,42 @@
 	button_icon_state = "meson"
 
 /datum/action/cooldown/borg_meson/Activate()
-	var/mob/living/silicon/robot/borg = owner
-	if(borg.sight & SEE_TURFS)
-		borg.sight_mode = BORGDEFAULT
+	if(HAS_TRAIT_FROM(owner, TRAIT_MESON_VISION, ACTION_TRAIT))
+		UnregisterSignal(owner, COMSIG_LIVING_RESTORE_INITIAL_SIGHT)
+		REMOVE_TRAIT(owner, TRAIT_MESON_VISION, ACTION_TRAIT)
 	else
-		borg.sight_mode = BORGMESON
-	borg.update_sight()
+		RegisterSignal(owner, COMSIG_LIVING_RESTORE_INITIAL_SIGHT, PROC_REF(on_initial_sight)) //order is important as update_sight() is called when the vision trait is added/removed
+		ADD_TRAIT(owner, TRAIT_MESON_VISION, ACTION_TRAIT)
+
+/datum/action/cooldown/borg_meson/Remove(mob/remove_from)
+	UnregisterSignal(owner, COMSIG_LIVING_RESTORE_INITIAL_SIGHT)
+	REMOVE_TRAIT(remove_from, TRAIT_MESON_VISION, ACTION_TRAIT)
+	return ..()
+
+///Add meson green shading to darker areas
+/datum/action/cooldown/borg_meson/proc/on_initial_sight(mob/living/source)
+	SIGNAL_HANDLER
+	source.lighting_color_cutoffs = blend_cutoff_colors(source.lighting_color_cutoffs, list(5, 15, 5))
 
 /obj/item/robot_model/engineering/be_transformed_to(obj/item/robot_model/old_model, forced = FALSE)
-	var/datum/action/cooldown/borg_meson/night_vision = new(loc)
 	. = ..()
 	if(!.)
 		return
-	night_vision.Grant(loc)
-	night_vision_ref = WEAKREF(night_vision)
+
+	//Grant night vision action
+	var/datum/action/cooldown/borg_meson/meson = new(loc)
+	meson.Grant(loc)
+	meson_vision_ref = WEAKREF(meson)
 
 /obj/item/robot_model/engineering/Destroy()
-	QDEL_NULL(night_vision_ref)
+	QDEL_NULL(meson_vision_ref)
 	return ..()
 
 /obj/item/robot_model/janitor
 	name = "Janitor"
 	basic_modules = list(
 		/obj/item/assembly/flash/cyborg,
+		/obj/item/borg/cleaner_box,
 		/obj/item/screwdriver/cyborg,
 		/obj/item/crowbar/cyborg,
 		/obj/item/stack/tile/iron/base/cyborg, // haha jani will have old tiles >:D
@@ -949,7 +964,7 @@
 	name = "Syndicate Assault"
 	basic_modules = list(
 		/obj/item/assembly/flash/cyborg,
-		/obj/item/melee/energy/sword/cyborg,
+		/obj/item/melee/energy/sword/saber/cyborg,
 		/obj/item/gun/energy/printer,
 		/obj/item/gun/ballistic/revolver/grenadelauncher/cyborg,
 		/obj/item/card/emag,
@@ -966,6 +981,9 @@
 	..()
 	var/mob/living/silicon/robot/cyborg = loc
 	cyborg.remove_faction(FACTION_SILICON) //ai turrets
+	add_minimap_blip(cyborg, MINIMAP_NUKEOP_BORG_BLIP, "combatborg")
+	var/datum/action/minimap/nuclear/tacmap_action = new
+	tacmap_action.Grant(cyborg)
 
 /obj/item/robot_model/syndicate/remove_module(obj/item/removed_module)
 	..()
@@ -982,7 +1000,7 @@
 		/obj/item/borg/cyborg_omnitool/medical,
 		/obj/item/borg/cyborg_omnitool/medical,
 		/obj/item/blood_filter,
-		/obj/item/melee/energy/sword/cyborg/saw,
+		/obj/item/melee/energy/sword/saber/cyborg/saw,
 		/obj/item/emergency_bed/silicon,
 		/obj/item/crowbar/cyborg,
 		/obj/item/extinguisher/mini,
@@ -997,6 +1015,13 @@
 	model_select_icon = "malf"
 	model_traits = list(TRAIT_PUSHIMMUNE)
 	hat_offset = list("north" = list(0, 3), "south" = list(0, 3), "east" = list(-1, 3), "west" = list(1, 3))
+
+/obj/item/robot_model/syndicate_medical/rebuild_modules()
+	..()
+	var/mob/living/silicon/robot/cyborg = loc
+	add_minimap_blip(cyborg, MINIMAP_NUKEOP_BORG_BLIP, "mediborg")
+	var/datum/action/minimap/nuclear/tacmap_action = new
+	tacmap_action.Grant(cyborg)
 
 /obj/item/robot_model/saboteur
 	name = "Syndicate Saboteur"
@@ -1029,18 +1054,35 @@
 	canDispose = TRUE
 	var/datum/weakref/thermal_vision_ref
 
+/obj/item/robot_model/saboteur/rebuild_modules()
+	..()
+	var/mob/living/silicon/robot/cyborg = loc
+	add_minimap_blip(cyborg, MINIMAP_NUKEOP_BORG_BLIP, "engiborg")
+	var/datum/action/minimap/nuclear/tacmap_action = new
+	tacmap_action.Grant(cyborg)
+
 /datum/action/cooldown/borg_thermal
 	name = "Toggle Thermal Night Vision"
 	button_icon = 'icons/mob/actions/actions_mecha.dmi'
 	button_icon_state = "thermal"
 
 /datum/action/cooldown/borg_thermal/Activate()
-	var/mob/living/silicon/robot/borg = owner
-	if(borg.sight & SEE_MOBS)
-		borg.sight_mode = BORGDEFAULT
+	if(HAS_TRAIT_FROM(owner, COMSIG_LIVING_RESTORE_INITIAL_SIGHT, ACTION_TRAIT))
+		UnregisterSignal(owner, COMSIG_MOB_UPDATE_SIGHT)
+		REMOVE_TRAIT(owner, TRAIT_THERMAL_VISION, ACTION_TRAIT)
 	else
-		borg.sight_mode = BORGTHERM
-	borg.update_sight()
+		RegisterSignal(owner, COMSIG_LIVING_RESTORE_INITIAL_SIGHT, PROC_REF(on_initial_sight)) //order is important as update_sight() is called when the vision trait is added/removed
+		ADD_TRAIT(owner, TRAIT_THERMAL_VISION, ACTION_TRAIT)
+
+/datum/action/cooldown/borg_thermal/Remove(mob/remove_from)
+	UnregisterSignal(owner, COMSIG_LIVING_RESTORE_INITIAL_SIGHT)
+	REMOVE_TRAIT(remove_from, TRAIT_THERMAL_VISION, ACTION_TRAIT)
+	return ..()
+
+///Add thermal reddish tint to darker areas
+/datum/action/cooldown/borg_thermal/proc/on_initial_sight(mob/living/source)
+	SIGNAL_HANDLER
+	source.lighting_color_cutoffs = blend_cutoff_colors(source.lighting_color_cutoffs, list(25, 8, 5))
 
 /obj/item/robot_model/saboteur/be_transformed_to(obj/item/robot_model/old_model, forced = FALSE)
 	var/datum/action/cooldown/borg_thermal/thermal_vision = new(loc)
@@ -1092,6 +1134,8 @@
 	var/energy
 	///Whether this resource should refill from the aether inside a charging station.
 	var/renewable = TRUE
+	///Lazylist of all modules linked to this energy storage, so using one will update all.
+	var/list/obj/item/stack/linked_modules
 
 /datum/robot_energy_storage/New(obj/item/robot_model/model)
 	energy = max_energy
@@ -1099,6 +1143,10 @@
 		model.storages |= src
 		RegisterSignal(model.robot, COMSIG_MOB_GET_STATUS_TAB_ITEMS, PROC_REF(get_status_tab_item))
 		RegisterSignal(model, COMSIG_QDELETING, PROC_REF(unregister_from_model))
+
+/datum/robot_energy_storage/Destroy(force)
+	LAZYCLEARLIST(linked_modules)
+	return ..()
 
 /datum/robot_energy_storage/proc/unregister_from_model(obj/item/robot_model/model)
 	SIGNAL_HANDLER
@@ -1121,6 +1169,8 @@
 
 /datum/robot_energy_storage/proc/add_charge(amount)
 	energy = min(energy + amount, max_energy)
+	for(var/obj/item/stack/modules as anything in linked_modules)
+		modules.update_appearance(UPDATE_NAME)
 
 /datum/robot_energy_storage/material
 	name = "generic material storage"
